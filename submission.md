@@ -5,7 +5,7 @@ This file is a draft for the official evaluation request. Replace the contact pl
 ## Basic information
 
 - System name: Chronicle Memory
-- Version: 0.1.0
+- Version: 0.2.0
 - Evaluation type: Textual Memory
 - Participant division: Academic Methods
 - Submission route: Submit code for platform deployment
@@ -14,20 +14,20 @@ This file is a draft for the official evaluation request. Replace the contact pl
 
 ## Short description
 
-Chronicle Memory is an evidence-only textual memory system for long-context, temporal, personalized, and multi-hop retrieval. It uses explicit per-user isolation, synchronous durable writes, BM25-style retrieval, phrase and temporal matching, recency weighting, session-aware ranking, and source-session diversity. Search returns ranked memory evidence only; it does not generate answers. The platform performs Answer and Eval under the unified benchmark contract.
+Chronicle Memory is an evidence-only textual memory system for long-context, temporal, personalized, and multi-hop retrieval. It uses explicit per-user isolation, synchronous durable writes, BM25-style retrieval, ordered temporal-event records, indexed entities and relations, bounded two-hop expansion, phrase and temporal matching, recency weighting, session-aware ranking, and source-session diversity. Search returns ranked memory evidence only; it does not generate answers. The platform performs Answer and Eval under the unified benchmark contract.
 
 ## Technical contribution
 
-The method combines a transparent lexical retriever with temporal and conversational signals that are useful for memory evaluation. Exact phrase matching protects named facts, year matching helps temporal questions, recency weighting handles evolving memories, and session diversity avoids returning many near-duplicate chunks from one source conversation. An optional `gpt-4o-mini` adapter extracts retrieval cues and expands queries, but cannot produce or alter returned evidence.
+The method combines a transparent lexical retriever with auditable temporal and graph signals. Each memory stores a primary event and an ordered event sequence, with normalized event time, event type, temporal expression, entities, and relations. SQLite indexes support entity lookup and at most two relation/entity hops from lexical seeds. Change relations preserve both current and previous values, so a later database or preference can be retrieved without generating an answer. Exact phrase matching protects named facts, temporal ranking handles event order, recency weighting handles evolving memories, and session diversity avoids returning many near-duplicate chunks from one source conversation. An optional `gpt-4o-mini` adapter extracts retrieval cues and expands queries, but cannot produce or alter returned evidence.
 
 ## Reproducibility
 
 ```text
-docker build -t chronicle-memory:0.1.0 .
+docker build -t chronicle-memory:0.3.0 .
 docker run --rm -p 8000:8000 \
   -e OPENAI_API_KEY=<provided privately at deployment> \
   -e OPENAI_MODEL=gpt-4o-mini \
-  chronicle-memory:0.1.0
+  chronicle-memory:0.3.0
 ```
 
 API entrypoints:
