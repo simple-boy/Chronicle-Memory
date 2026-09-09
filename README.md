@@ -1,6 +1,6 @@
 # Chronicle Memory
 
-Chronicle Memory is an evidence-only textual memory system for the Agent Memory Challenge 2026. It is designed for the Academic Methods board and exposes the required synchronous `Add` and `Search` endpoints. Version `0.2.0` adds deterministic temporal-event records, entity/relation indexes, and bounded multi-hop candidate expansion.
+Chronicle Memory is an evidence-only textual memory system. It is designed for the Academic Methods board and exposes the required synchronous `Add` and `Search` endpoints. Version `0.2.0` adds deterministic temporal-event records, entity/relation indexes, and bounded multi-hop candidate expansion.
 
 ## Method
 
