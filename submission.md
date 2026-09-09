@@ -23,11 +23,11 @@ The method combines a transparent lexical retriever with auditable temporal and 
 ## Reproducibility
 
 ```text
-docker build -t chronicle-memory:0.3.0 .
+docker build -t chronicle-memory:0.2.0 .
 docker run --rm -p 8000:8000 \
   -e OPENAI_API_KEY=<provided privately at deployment> \
   -e OPENAI_MODEL=gpt-4o-mini \
-  chronicle-memory:0.3.0
+  chronicle-memory:0.2.0
 ```
 
 API entrypoints:
