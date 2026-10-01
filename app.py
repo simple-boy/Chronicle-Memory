@@ -1,20 +1,20 @@
-"""Minimal dependency-free HTTP service for the Agent Memory Challenge."""
+"""Cycle 2 Textual Add/Search service."""
 
 from __future__ import annotations
 
 import json
 import os
+import hmac
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from memory_core import MemoryStore
-from model_adapter import ModelAdapter
 
 
 STORE = MemoryStore(os.getenv("MEMORY_DB_PATH", "data/memories.sqlite3"))
-MODEL = ModelAdapter()
 API_KEY = os.getenv("MEMORY_API_KEY", "").strip()
+MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(32 * 1024 * 1024)))
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -22,7 +22,7 @@ def _json_bytes(value: Any) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ChronicleMemory/0.1"
+    server_version = "ChronicleMemory/2.0"
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"{self.address_string()} - {format % args}")
@@ -34,7 +34,7 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         if auth.lower().startswith("bearer ") or auth.lower().startswith("token "):
             candidates.append(auth.split(" ", 1)[1])
-        return any(candidate == API_KEY for candidate in candidates)
+        return any(hmac.compare_digest(candidate, API_KEY) for candidate in candidates)
 
     def _send(self, status: int, value: Any) -> None:
         data = _json_bytes(value)
@@ -47,7 +47,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path.split("?", 1)[0] == "/health":
-            self._send(HTTPStatus.OK, {"status": "ok", "service": "chronicle-memory", "model": MODEL.model})
+            self._send(HTTPStatus.OK, {"status": "ok", "service": "chronicle-memory-v2"})
             return
         self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
@@ -61,8 +61,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 2_000_000:
-                raise ValueError("invalid content length")
+            if length <= 0 or length > MAX_REQUEST_BYTES:
+                raise ValueError(f"Content-Length must be between 1 and {MAX_REQUEST_BYTES} bytes")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("JSON object required")
@@ -72,53 +72,53 @@ class Handler(BaseHTTPRequestHandler):
                 response = self._search(payload)
             self._send(HTTPStatus.OK, response)
         except ValueError as exc:
-            self._send(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+            status = HTTPStatus.CONFLICT if "request_id was reused" in str(exc) else HTTPStatus.UNPROCESSABLE_ENTITY
+            self._send(status, {"detail": {"reason": str(exc)}})
         except Exception as exc:
-            print(f"request failed: {exc}")
-            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal_error"})
+            print(f"request failed: {type(exc).__name__}")
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": {"reason": "internal_error"}})
 
     @staticmethod
     def _required(payload: dict[str, Any], name: str) -> str:
         value = payload.get(name)
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} is required")
-        return value.strip()
+        return value
 
     def _add(self, payload: dict[str, Any]) -> dict[str, Any]:
         request_id = self._required(payload, "request_id")
         user_id = self._required(payload, "user_id")
         session_id = self._required(payload, "session_id")
-        content = self._required(payload, "content")
-        annotations = MODEL.annotate(content)
-        memory_id = STORE.add(
+        messages = payload.get("messages")
+        STORE.add_messages(
             request_id=request_id,
             user_id=user_id,
             session_id=session_id,
-            content=content,
-            model_terms=annotations,
+            messages=messages,
         )
         return {
             "success": True,
             "request_id": request_id,
             "user_id": user_id,
             "session_id": session_id,
-            "memory_ids": [memory_id],
         }
 
     def _search(self, payload: dict[str, Any]) -> dict[str, Any]:
         user_id = self._required(payload, "user_id")
         query = self._required(payload, "query")
-        top_k = payload.get("top_k", 100)
-        if isinstance(top_k, bool) or not isinstance(top_k, int):
-            raise ValueError("top_k must be an integer")
-        expanded = MODEL.expand_query(query)
-        retrieval_query = " ".join([query, *expanded]) if expanded else query
+        top_k = payload.get("top_k")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            raise ValueError("top_k must be a positive integer")
+        options = payload.get("options")
+        if options is not None and (not isinstance(options, list) or any(not isinstance(option, str) for option in options)):
+            raise ValueError("options must be an array of strings")
         return {
             "data": STORE.search(
                 user_id=user_id,
-                query=retrieval_query,
+                query=query,
                 top_k=top_k,
-                session_id=payload.get("session_id") if isinstance(payload.get("session_id"), str) else None,
+                options=options,
+                include_source=True,
             )
         }
 
