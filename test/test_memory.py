@@ -2,15 +2,19 @@ import tempfile
 import unittest
 import sqlite3
 import json
+from pathlib import Path
 
 from memory_core import MemoryStore, extract_structure
 
 
 class MemoryStoreTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
-        self.tmp.close()
-        self.store = MemoryStore(self.tmp.name)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.store = MemoryStore(str(Path(self.temporary.name) / "memory.sqlite3"))
+
+    def tearDown(self):
+        self.store.close()
+        self.temporary.cleanup()
 
     def test_add_is_idempotent(self):
         args = dict(
@@ -116,23 +120,26 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(results[0]["content"], "Alice now uses Postgres for Atlas.")
 
     def test_legacy_database_is_migrated(self):
-        legacy = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
-        legacy.close()
-        conn = sqlite3.connect(legacy.name)
-        conn.execute(
-            "CREATE TABLE memories (memory_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_id TEXT NOT NULL, request_id TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL, token_json TEXT NOT NULL, model_term_json TEXT NOT NULL, UNIQUE(user_id, request_id))"
-        )
-        conn.execute(
-            "INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("legacy-1", "legacy-user", "s", "r", "Legacy event in 2024.", 1.0, json.dumps(["legacy", "event"]), "[]"),
-        )
-        conn.commit()
-        conn.close()
-        store = MemoryStore(legacy.name)
-        row = store._connection().execute("SELECT event_time, structure_json FROM memories WHERE memory_id='legacy-1'").fetchone()
-        self.assertEqual(row["event_time"], "2024")
-        self.assertIn("event", json.loads(row["structure_json"]))
-        self.assertEqual(store.search(user_id="legacy-user", query="legacy event")[0]["content"], "Legacy event in 2024.")
+        with tempfile.TemporaryDirectory() as directory:
+            legacy_path = str(Path(directory) / "legacy.sqlite3")
+            conn = sqlite3.connect(legacy_path)
+            conn.execute(
+                "CREATE TABLE memories (memory_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_id TEXT NOT NULL, request_id TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL, token_json TEXT NOT NULL, model_term_json TEXT NOT NULL, UNIQUE(user_id, request_id))"
+            )
+            conn.execute(
+                "INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("legacy-1", "legacy-user", "s", "r", "Legacy event in 2024.", 1.0, json.dumps(["legacy", "event"]), "[]"),
+            )
+            conn.commit()
+            conn.close()
+            store = MemoryStore(legacy_path)
+            try:
+                row = store._connection().execute("SELECT event_time, structure_json FROM memories WHERE memory_id='legacy-1'").fetchone()
+                self.assertEqual(row["event_time"], "2024")
+                self.assertIn("event", json.loads(row["structure_json"]))
+                self.assertEqual(store.search(user_id="legacy-user", query="legacy event")[0]["content"], "Legacy event in 2024.")
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

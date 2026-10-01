@@ -1,0 +1,72 @@
+flowchart LR
+    accTitle: Chronicle Memory V2 Source Evidence Pipeline
+    accDescr: Ordered messages enter SQLite source storage and deterministic indexes. Explicit user forget commands delete complete matching facts without becoming evidence. Search combines lexical, entity, temporal, cross-session neighbor, recent, and bounded fallback candidates, then returns source evidence to the external AML Answer and Eval stages.
+
+    subgraph input_region ["INPUTS"]
+        direction TB
+        conversation_messages["Ordered conversation messages"]
+        query_options["Query + options"]
+    end
+
+    subgraph writing_region ["MEMORY WRITING · CHRONICLE-MEMORY V2"]
+        direction TB
+        add_api["Add API"]
+        ordered_ingest["Idempotent ordered ingest"]
+        explicit_forget["Explicit user forget<br/>Exact source fact deletion"]
+        temporal_entity_parse["Temporal + entity/relation parsing"]
+        explicit_supersession["Explicit supersession update"]
+        add_api --> ordered_ingest
+        ordered_ingest -->|forget command| explicit_forget
+        ordered_ingest -->|source message| temporal_entity_parse --> explicit_supersession
+    end
+
+    subgraph storage_region ["MEMORY STORAGE · CHRONICLE-MEMORY V2"]
+        direction TB
+        sqlite_memory[("SQLite memory store<br/>Raw messages · source metadata · status")]
+        fts5_index[("FTS5 lexical index")]
+        temporal_index[("Temporal index")]
+        entity_relation_index[("Entity + relation index")]
+    end
+
+    subgraph retrieval_region ["MEMORY RETRIEVAL · CHRONICLE-MEMORY V2"]
+        direction TB
+        search_api["Search API"]
+        deterministic_query_parse["Deterministic query parsing<br/>Word-form aliases"]
+        hybrid_candidates["Hybrid candidate union<br/>Lexical · entity · temporal · relation<br/>Cross-session neighbors · recent · bounded fallback"]
+        evidence_reranking["Evidence reranking<br/>Relevance · time · relation · status"]
+        ranked_evidence["Ranked source evidence<br/>source_time? · ingested_at"]
+        search_api --> deterministic_query_parse --> hybrid_candidates --> evidence_reranking --> ranked_evidence
+    end
+
+    subgraph aml_region ["EXTERNAL · AML PLATFORM"]
+        direction TB
+        aml_answer["AML Answer"] --> aml_eval["AML Eval"]
+    end
+
+    conversation_messages --> add_api
+    ordered_ingest -->|raw source| sqlite_memory
+    ordered_ingest -->|source terms| fts5_index
+    temporal_entity_parse -->|event time| temporal_index
+    temporal_entity_parse -->|entities + relations| entity_relation_index
+    explicit_supersession -->|status link| sqlite_memory
+    explicit_forget -.->|delete matching source + indexes| sqlite_memory
+
+    query_options --> search_api
+    fts5_index --> hybrid_candidates
+    temporal_index --> hybrid_candidates
+    entity_relation_index --> hybrid_candidates
+    sqlite_memory -->|neighbors · recent · fallback| hybrid_candidates
+    sqlite_memory -->|source + status| evidence_reranking
+    ranked_evidence -->|Search data| aml_answer
+
+    classDef input_style fill:#f1f5f9,stroke:#64748b,stroke-width:1.5px,color:#0f172a
+    classDef write_style fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#1e3a5f
+    classDef store_style fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
+    classDef retrieve_style fill:#fef9c3,stroke:#ca8a04,stroke-width:1.5px,color:#713f12
+    classDef external_style fill:#ede9fe,stroke:#7c3aed,stroke-width:1.5px,color:#3b0764
+
+    class conversation_messages,query_options input_style
+    class add_api,ordered_ingest,explicit_forget,temporal_entity_parse,explicit_supersession write_style
+    class sqlite_memory,fts5_index,temporal_index,entity_relation_index store_style
+    class search_api,deterministic_query_parse,hybrid_candidates,evidence_reranking,ranked_evidence retrieve_style
+    class aml_answer,aml_eval external_style

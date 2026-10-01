@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/chronicle-memory-v2/memory.schema.json",
+  "title": "Chronicle-Memory V2 stored raw message",
+  "description": "Internal SQLite record; not the public Add/Search wire format.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["memory_id", "user_id", "session_id", "request_id", "role", "content", "created_at", "sequence_no", "message_index", "status", "structure"],
+  "properties": {
+    "memory_id": {"type": "string", "minLength": 1},
+    "user_id": {"type": "string", "minLength": 1},
+    "session_id": {"type": "string", "minLength": 1},
+    "request_id": {"type": "string", "minLength": 1},
+    "role": {"enum": ["user", "assistant"]},
+    "content": {"type": "string", "minLength": 1},
+    "created_at": {"type": "number", "description": "Persistence time as Unix seconds."},
+    "timestamp_ms": {"type": ["integer", "null"], "description": "Source time supplied by the platform, in Unix milliseconds."},
+    "sequence_no": {"type": "integer", "minimum": 0},
+    "message_index": {"type": "integer", "minimum": 0},
+    "status": {"enum": ["active", "superseded"]},
+    "superseded_by": {"type": ["string", "null"]},
+    "event_type": {"type": ["string", "null"]},
+    "event_time": {"type": ["string", "null"]},
+    "event_time_key": {"type": ["integer", "null"]},
+    "model_terms": {"type": "array", "items": {"type": "string"}},
+    "structure": {
+      "type": "object",
+      "required": ["memory_type", "event", "events", "entities", "relations"],
+      "properties": {
+        "memory_type": {"type": "string"},
+        "event": {"type": "object"},
+        "events": {"type": "array", "items": {"type": "object"}},
+        "entities": {"type": "array", "items": {"type": "string"}},
+        "relations": {"type": "array", "items": {"type": "object"}}
+      }
+    }
+  }
+}

@@ -12,28 +12,6 @@ The system stores source messages with their original text, role, session, order
 
 Search returns ranked source evidence only. It does not write an answer into memory or generate a final response.
 
-## Motivation
-
-Cycle 2 evaluates long conversations, cross-session history, temporal events, multi-hop relations, personalization, governance, and streaming memory. It sends ordered messages to Add and questions to Search under the same `user_id`. A source-preserving store avoids losing details before the question is known. Time and state are useful retrieval signals, but old evidence stays available for historical questions.
-
-This is a competition engineering upgrade, **not a claim that hierarchy, hybrid retrieval, temporal memory, or conflict tracking were invented here**. [Recent primary-source comparison and falsification plan](docs/NOVELTY_AND_EXPERIMENTS.md) identifies close prior work.
-
-## Compared with Chronicle-Memory V1
-
-| Area | V1 repository code | V2 implementation |
-|---|---|---|
-| Add input | One top-level `content` string | Official ordered `messages[]` with `role`, `content`, optional Unix-ms `timestamp` |
-| Add safety | One content row per request; same text may collapse | All messages stored atomically; same request and payload are idempotent; changed retry is rejected |
-| Retrieval | FTS5, BM25-style, entity/relation, two-hop, absolute date scoring | Keeps those components; adds source-time lookup, adjacent turns, bounded cross-session before/after and latest candidates, and current/history status signals |
-| Relative time | No source-anchored parsing | Resolves simple expressions such as yesterday/today when the message has a timestamp; keeps raw wording |
-| Changes | `from X to Y` relation within one memory | Explicit matching prior fact marked `superseded` internally; both source records remain retrievable |
-| Explicit forget | No narrow complete-fact deletion in the inspected Add path | A direct user `forget`/`delete`/`remove` instruction can delete only an exactly matching complete fact and its searchable indexes; this is not general semantic forgetting |
-| Single-session Top K | Diversity rule could return only five of twenty relevant records | Returns the highest-scoring records up to Top K without a per-session quota |
-| Runtime | `app.py` imported missing `model_adapter.py` | Dependency-free service starts and answers local Add/Search requests |
-| Submission route | README described platform-deployed Docker | Participant-hosted public Add/Search API; Docker is only a deployment aid |
-
-The first column describes the inspected V1 **repository**, not an independently verified Cycle 1 official protocol. Full source audit: [V1_AUDIT.md](docs/V1_AUDIT.md).
-
 ## Method
 
 ### Memory Writing
@@ -64,7 +42,7 @@ The internal [JSON Schema](config/memory.schema.json) records the implemented fi
 
 ![Chronicle-Memory V2 paper method framework](docs/chronicle-memory-v2-paper-figure.png)
 
-The top lane shows Add, source-preserving writes, state changes, and SQLite indexes. The lower lane shows parallel lexical, entity, temporal, neighbor, and bounded fallback retrieval, followed by ranking and evidence output. The dashed AML block is external to this service. The Mia/tea/coffee text is an illustrative case for the implemented narrow supersession rule. See the [full architecture description](docs/ARCHITECTURE.md) for precise code mapping and the figure caption; [image-generation prompt and revisions](docs/IMAGEGEN_FIGURE_PROMPT.md) are recorded. An [editable technical SVG](docs/chronicle-memory-v2-framework.svg) and [PDF](docs/chronicle-memory-v2-framework.pdf) remain available for label-level editing.
+The top lane shows Add, source-preserving writes, state changes, and SQLite indexes. The lower lane shows parallel lexical, entity, temporal, neighbor, and bounded fallback retrieval, followed by ranking and evidence output. The dashed AML block is external to this service. The Mia/tea/coffee text is an illustrative case for the implemented narrow supersession rule. See the [full architecture description](docs/ARCHITECTURE.md) for precise code mapping and the figure caption. 
 
 ## Installation
 
@@ -148,25 +126,3 @@ For `--variant v1`, first clone the original repository separately and check out
 
 The script reports Recall@1/5/10, MRR, Add/Search p50/p95, memory bytes, and model call counts. These are **local evidence diagnostics, not official AML metrics**. The bundled toy file is a functionality check, not a performance benchmark. Public AML pipelines provide only partial Answer/Eval components and no complete corpus, Add/Search orchestrator, private labels, or Full score reproduction. Official scores require the platform's Smoke and Full runs.
 
-## Ablation
-
-The local script supports `full`, `lexical`, `minus_temporal`, `minus_entity_graph`, `minus_adjacent`, `minus_conflict`, and `minus_options`. Use identical inputs, source timestamp policy, Top K, answer model, token budget, and hardware when comparing variants. A V1 comparison should adapt the same `messages[]` input to V1's single-chunk Add while preserving all text, then report the adapter cost. A dense/vector or consolidation ablation requires implementation and rules clarification first; it is not represented as a completed component.
-
-| Method | Official score | Recall@5 | Search p95 | Memory bytes |
-|---|---:|---:|---:|---:|
-| V1 adapted | null | null | null | null |
-| V2 lexical | null | null | null | null |
-| V2 full | null | null | null | null |
-| V2 minus temporal/entity/adjacent/conflict | null | null | null | null |
-
-Experiment design, closest prior methods, subgroup metrics, grouped bootstrap, and stopping rules: [NOVELTY_AND_EXPERIMENTS.md](docs/NOVELTY_AND_EXPERIMENTS.md).
-
-## Competition Submission
-
-Cycle 2 requires a participant-hosted API plus a public repository at a fixed commit, capacity/authentication notes, source attribution, a passing platform Smoke, a completed Full, and review. The application window closes **2026-10-31 23:59 UTC+8**; formal evaluation stops **2026-11-04 23:59 UTC+8**. The second Full is available only 30 days after the first finishes, so plan the first run carefully. See [SUBMISSION_CHECKLIST.md](SUBMISSION_CHECKLIST.md) and [submission.md](submission.md).
-
-The official pages currently differ on model wording: the competition FAQ names `text-embedding-v4` and `gpt-4o-mini` for the former “academic” group; the Full gate expects `gpt-4o-mini` during Add for Open-source Methods; the documentation says the internal embedding/index model is not prescribed. This code makes **zero LLM, embedding, or external network calls**. Confirm eligibility of this deterministic configuration with the organizer before an Open-source Methods Full run; do not silently substitute another model.
-
-## Acknowledgement
-
-V2 builds directly on the original [Chronicle-Memory V1 repository](https://github.com/simple-boy/Chronicle-Memory) and preserves its SQLite/FTS5 and entity/time retrieval foundation. The [Agent Memory Challenge](https://agentmemories.ai/competition/) and [AML public contract](https://agentmemories.ai/rules) define the evaluation boundary. A public software license for this derivative remains to be selected by the repository owner before publication.
