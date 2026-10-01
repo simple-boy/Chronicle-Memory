@@ -2,7 +2,7 @@
 
 **Source-Preserving Temporal Evidence Retrieval for Long-Term Agent Memory**
 
-Chronicle-Memory V2 is a runnable **Textual Memory / Open-source Methods** candidate for the second Agent Memory Challenge. It implements the participant side of the current contract: synchronous Add and evidence-only Search. The competition platform performs Answer and Eval. V2 is a targeted continuation of [Chronicle-Memory V1](https://github.com/simple-boy/Chronicle-Memory), audited at commit `00d0862560aba0213ca122ef62a1bba37cf5e431`.
+Chronicle-Memory V2 implements the participant side of the current contract: synchronous Add and evidence-only Search. The competition platform performs Answer and Eval. V2 is a targeted continuation of [Chronicle-Memory V1](https://github.com/simple-boy/Chronicle-Memory), audited at commit `00d0862560aba0213ca122ef62a1bba37cf5e431`.
 
 **Current status (2026-09-26):** the current local tree passed 40 V2 contract/scenario tests and 13 retained V1 regression tests. The service has not been Docker-built here, deployed to a public endpoint, or run through official Smoke or Full. No competition score is claimed. The official corpus, private questions, and Full orchestrator are not in the public evaluation repository. See the [Cycle 2 rules audit](docs/CYCLE2_RULES.md), [phase-by-phase project report](docs/PROJECT_REPORT.md), and [submission checklist](SUBMISSION_CHECKLIST.md).
 
