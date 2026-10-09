@@ -56,7 +56,7 @@ The internal [JSON Schema](config/memory.schema.json) records the implemented fi
 
 ## Architecture
 
-The top lane shows Add, source-preserving writes, state changes, and SQLite indexes. The lower lane shows parallel lexical, entity, temporal, neighbor, and bounded fallback retrieval, followed by ranking and evidence output. The dashed AML block is external to this service. The Mia/tea/coffee text is an illustrative case for the implemented narrow supersession rule.
+The top lane shows Add, source-preserving writes, state changes, and SQLite indexes. The lower lane shows parallel lexical, entity, temporal, neighbor, and bounded fallback retrieval, followed by ranking and evidence output. The dashed AML block is external to this service. The Mia/tea/coffee text is an illustrative case for the implemented narrow supersession rule. See the [full architecture description](docs/ARCHITECTURE.md) for precise code mapping and the figure caption. 
 
 The current diagram is [architecture.mmd](docs/architecture.mmd): Add → grounded indexing/property history → SQLite raw/fact/entity/time indexes → query candidates → ranking/evidence selection → source evidence → external AML Answer/Eval. The previous PNG is a historical V2 illustration.
 
