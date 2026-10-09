@@ -1,5 +1,5 @@
 flowchart LR
-    accTitle: Chronicle Memory V2 Source Evidence Pipeline
+    accTitle: Chronicle Memory V2.1 Source Evidence Pipeline
     accDescr: Ordered messages enter SQLite source storage and deterministic indexes. Explicit user forget commands delete complete matching facts without becoming evidence. Search combines lexical, entity, temporal, cross-session neighbor, recent, and bounded fallback candidates, then returns source evidence to the external AML Answer and Eval stages.
 
     subgraph input_region ["INPUTS"]
@@ -8,34 +8,36 @@ flowchart LR
         query_options["Query + options"]
     end
 
-    subgraph writing_region ["MEMORY WRITING · CHRONICLE-MEMORY V2"]
+    subgraph writing_region ["MEMORY WRITING · CHRONICLE-MEMORY V2.1"]
         direction TB
         add_api["Add API"]
         ordered_ingest["Idempotent ordered ingest"]
         explicit_forget["Explicit user forget<br/>Exact source fact deletion"]
-        temporal_entity_parse["Temporal + entity/relation parsing"]
-        explicit_supersession["Explicit supersession update"]
+        temporal_entity_parse["Calendar intervals + entity/relation parsing<br/>Source-grounded atomic fact keys"]
+        explicit_supersession["Property-level state history<br/>Self-report source protection + exact-value negation"]
         add_api --> ordered_ingest
         ordered_ingest -->|forget command| explicit_forget
         ordered_ingest -->|source message| temporal_entity_parse --> explicit_supersession
     end
 
-    subgraph storage_region ["MEMORY STORAGE · CHRONICLE-MEMORY V2"]
+    subgraph storage_region ["MEMORY STORAGE · CHRONICLE-MEMORY V2.1"]
         direction TB
         sqlite_memory[("SQLite memory store<br/>Raw messages · source metadata · status")]
         fts5_index[("FTS5 lexical index")]
         temporal_index[("Temporal index")]
         entity_relation_index[("Entity + relation index")]
+        fact_index[("Atomic fact index<br/>Subject · property · state history")]
     end
 
-    subgraph retrieval_region ["MEMORY RETRIEVAL · CHRONICLE-MEMORY V2"]
+    subgraph retrieval_region ["MEMORY RETRIEVAL · CHRONICLE-MEMORY V2.1"]
         direction TB
         search_api["Search API"]
-        deterministic_query_parse["Deterministic query parsing<br/>Word-form aliases"]
+        deterministic_query_parse["Deterministic query parsing<br/>Property · entity · calendar window"]
         hybrid_candidates["Hybrid candidate union<br/>Lexical · entity · temporal · relation<br/>Cross-session neighbors · recent · bounded fallback"]
-        evidence_reranking["Evidence reranking<br/>Relevance · time · relation · status"]
+        evidence_reranking["Evidence reranking<br/>Property state · source role · calendar overlap"]
+        evidence_pack["Bounded evidence selection<br/>Rare entity bridges · summary episode coverage"]
         ranked_evidence["Ranked source evidence<br/>source_time? · ingested_at"]
-        search_api --> deterministic_query_parse --> hybrid_candidates --> evidence_reranking --> ranked_evidence
+        search_api --> deterministic_query_parse --> hybrid_candidates --> evidence_reranking --> evidence_pack --> ranked_evidence
     end
 
     subgraph aml_region ["EXTERNAL · AML PLATFORM"]
@@ -48,6 +50,7 @@ flowchart LR
     ordered_ingest -->|source terms| fts5_index
     temporal_entity_parse -->|event time| temporal_index
     temporal_entity_parse -->|entities + relations| entity_relation_index
+    explicit_supersession -->|fact state history| fact_index
     explicit_supersession -->|status link| sqlite_memory
     explicit_forget -.->|delete matching source + indexes| sqlite_memory
 
@@ -55,6 +58,8 @@ flowchart LR
     fts5_index --> hybrid_candidates
     temporal_index --> hybrid_candidates
     entity_relation_index --> hybrid_candidates
+    fact_index --> hybrid_candidates
+    fact_index --> evidence_reranking
     sqlite_memory -->|neighbors · recent · fallback| hybrid_candidates
     sqlite_memory -->|source + status| evidence_reranking
     ranked_evidence -->|Search data| aml_answer
@@ -67,6 +72,6 @@ flowchart LR
 
     class conversation_messages,query_options input_style
     class add_api,ordered_ingest,explicit_forget,temporal_entity_parse,explicit_supersession write_style
-    class sqlite_memory,fts5_index,temporal_index,entity_relation_index store_style
-    class search_api,deterministic_query_parse,hybrid_candidates,evidence_reranking,ranked_evidence retrieve_style
+    class sqlite_memory,fts5_index,temporal_index,entity_relation_index,fact_index store_style
+    class search_api,deterministic_query_parse,hybrid_candidates,evidence_reranking,evidence_pack,ranked_evidence retrieve_style
     class aml_answer,aml_eval external_style

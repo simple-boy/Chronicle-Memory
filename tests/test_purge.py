@@ -85,6 +85,18 @@ class PurgeTests(unittest.TestCase):
             1,
         )
 
+    def test_apply_removes_derived_fact_states(self):
+        self.store.add_messages(request_id="old", user_id="alice", session_id="s1", messages=[{"role": "user", "content": "My email is disposable@example.test."}])
+        self.assertGreater(self.store._connection().execute("SELECT COUNT(*) FROM memory_facts").fetchone()[0], 0)
+        self._make_expired("alice")
+        self.store.close()
+        purge_expired.purge(self.db_path, days=29, apply=True)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM memory_facts").fetchone()[0], 0)
+        finally:
+            conn.close()
+
     def test_apply_handles_database_without_fts5_table(self):
         self.store.add_messages(
             request_id="old", user_id="alice", session_id="s1",

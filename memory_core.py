@@ -14,12 +14,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from fact_index import extract_facts, fact_index_terms, supports_state_update
+from temporal import event_time_windows, parse_event_time, query_time_window
+
 
 _TERM_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
 _QUERY_STOPWORDS = {
     "the", "a", "an", "this", "that", "it", "and", "or", "to", "of", "for", "with", "on", "in",
     "what", "which", "who", "why", "how", "did", "does", "do", "is", "are", "was", "were", "be",
-    "use", "used", "database", "i", "me", "my", "you", "your", "的", "是", "了", "吗", "呢", "请", "问", "什", "么", "哪", "个", "和", "与",
+    "i", "me", "my", "you", "your", "的", "是", "了", "吗", "呢", "请", "问", "什", "么", "哪", "个", "和", "与",
 }
 _YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 _DATE_RE = re.compile(r"(?<!\d)(?P<year>(?:19|20)\d{2})[-/](?P<month>\d{1,2})(?:[-/](?P<day>\d{1,2}))?(?!\d)")
@@ -33,7 +36,7 @@ _MONTHS = {
     "may": 5, "june": 6, "july": 7, "august": 8,
     "september": 9, "october": 10, "november": 11, "december": 12,
 }
-_TEMPORAL_ENTITY_NAMES = set(_MONTHS) | {
+_TEMPORAL_ENTITY_NAMES = set(_MONTHS) | {name[:3] for name in _MONTHS} | {"sept"} | {
     "what", "which", "when", "where", "who", "why", "how", "did", "does", "do", "is", "are",
     "use", "used", "later", "after", "before", "current", "currently", "latest", "database",
 }
@@ -67,6 +70,9 @@ _STOP_ENTITY = {
     "use", "used", "later", "after", "before", "current", "currently", "latest", "database",
     "routine", "memory", "note", "notes", "record", "records", "event", "events", "item", "items",
     "data", "text", "user", "users", "session", "topic", "information",
+    "my", "your", "our", "we", "summarize", "summarise", "explain", "list", "tell", "describe", "please", "all",
+    "yesterday", "today", "tomorrow", "if", "imagine", "assume",
+    "on", "in", "at", "during", "from", "between", "last", "next", "this",
 }
 _EVENT_WORDS = {
     "review": "review", "migrat": "migration", "mov": "change", "switch": "change",
@@ -87,7 +93,8 @@ def terms(text: str) -> list[str]:
 
 
 def query_terms(text: str) -> list[str]:
-    raw = [token for token in terms(text) if token not in _QUERY_STOPWORDS]
+    source_tokens = terms(text)
+    raw = [token for token in source_tokens if token not in _QUERY_STOPWORDS]
     expanded = list(raw)
     aliases = {
         "when": ["date", "time", "year"], "where": ["location", "place"],
@@ -100,7 +107,8 @@ def query_terms(text: str) -> list[str]:
         "buy": ["bought", "purchase", "purchased"], "bought": ["buy", "purchase"],
         "go": ["went", "visited"], "went": ["go", "visited"],
         "give": ["gave", "given"], "gave": ["give", "given"],
-        "receive": ["received", "got"], "received": ["receive", "got"],
+        "receive": ["received", "got", "gave", "given"], "received": ["receive", "got", "gave", "given"],
+        "recipient": ["received", "gave", "given"],
         "prefer": ["preferred", "preference", "like", "likes"],
         "preferred": ["prefer", "preference", "like"],
         "like": ["likes", "prefer", "preferred"], "likes": ["like", "prefer"],
@@ -110,10 +118,21 @@ def query_terms(text: str) -> list[str]:
         "make": ["made"], "made": ["make"],
         "build": ["built"], "built": ["build"],
         "start": ["started"], "started": ["start"],
+        "use": ["uses", "used"], "uses": ["use", "used"], "used": ["use", "uses"],
+        "manage": ["manages", "managed"], "manages": ["manage", "managed"], "managed": ["manage", "manages"],
+        "phone": ["telephone", "number"], "telephone": ["phone", "number"],
+        "reside": ["live", "lives", "location"], "residence": ["live", "lives", "location"],
+        "employer": ["work", "works", "company"], "company": ["employer", "work", "works"],
+        "caused": ["because", "cause", "reason", "led", "result"],
+        "reason": ["because", "cause", "caused"], "prevented": ["blocked", "failed", "because"],
+        "delay": ["delayed", "blocked", "late"], "delayed": ["delay", "blocked", "late"],
+        "cause": ["caused", "because", "reason", "led"], "failure": ["failed", "broke", "broken"],
     }
-    for token in raw:
+    # Expand interrogatives before stopword filtering. Their aliases are search
+    # hints; they never become fabricated evidence in a Search response.
+    for token in source_tokens:
         expanded.extend(aliases.get(token, ()))
-    return expanded
+    return list(dict.fromkeys(expanded))
 
 
 def index_text(content: str, model_terms: Iterable[str] = ()) -> str:
@@ -121,6 +140,14 @@ def index_text(content: str, model_terms: Iterable[str] = ()) -> str:
     for item in model_terms:
         values.extend(terms(item))
     return " ".join(values)
+
+
+def structure_index_terms(structure: dict[str, Any]) -> list[str]:
+    """Short fact keys enrich the index while raw messages remain the values."""
+    values = fact_index_terms(structure.get("facts", []))
+    if any(relation.get("predicate") == "gave_to" for relation in structure.get("relations", [])):
+        values.extend(("recipient", "received", "giver"))
+    return values
 
 
 def explicit_forget_target(content: str) -> str | None:
@@ -196,6 +223,7 @@ def _event_sequence(content: str, default_type: str, fallback_event: dict[str, A
             "event_time": event_time,
             "event_time_key": event_time_key,
             "temporal_expression": temporal_expression,
+            "time_windows": event_time_windows(clause, timestamp_ms),
             "order_hint": order_hint,
             "text": clause,
         })
@@ -220,44 +248,7 @@ def _structure_time_keys(structure: dict[str, Any]) -> list[tuple[int, int, int]
 
 
 def _event_time(content: str, timestamp_ms: int | None = None) -> tuple[str | None, int | None, str | None]:
-    match = _DATE_RE.search(content) or _CN_DATE_RE.search(content)
-    if match:
-        year = int(match.group("year"))
-        month = int(match.group("month"))
-        if not 1 <= month <= 12:
-            return None, None, None
-        day = match.groupdict().get("day")
-        if day:
-            day_int = int(day)
-            try:
-                datetime(year, month, day_int)
-            except ValueError:
-                return None, None, None
-            return f"{year:04d}-{month:02d}-{day_int:02d}", year * 10000 + month * 100 + day_int, match.group(0)
-        return f"{year:04d}-{month:02d}", year * 100 + month, match.group(0)
-    match = _MONTH_YEAR_RE.search(content)
-    if match:
-        month = _MONTHS[match.group("month").casefold()]
-        year = int(match.group("year"))
-        return f"{year:04d}-{month:02d}", year * 100 + month, match.group(0)
-    match = _YEAR_RE.search(content)
-    if match:
-        year = int(match.group(0))
-        return str(year), year, match.group(0)
-    relative = re.search(r"\b(yesterday|today|tomorrow|last week)\b|昨天|今天|明天|上周", content, re.IGNORECASE)
-    if relative:
-        expression = relative.group(0)
-        if timestamp_ms is not None:
-            anchor = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).date()
-            key = expression.casefold()
-            offset = -1 if key in ("yesterday", "昨天") else 1 if key in ("tomorrow", "明天") else 0
-            if key in ("last week", "上周"):
-                anchor = anchor - timedelta(days=anchor.weekday() + 7)
-            else:
-                anchor = anchor + timedelta(days=offset)
-            return anchor.isoformat(), anchor.year * 10000 + anchor.month * 100 + anchor.day, expression
-        return None, None, expression
-    return None, None, None
+    return parse_event_time(content, timestamp_ms)
 
 
 def _time_sort_key(value: str | None) -> tuple[int, int, int] | None:
@@ -277,6 +268,19 @@ def _time_sort_key(value: str | None) -> tuple[int, int, int] | None:
     return None
 
 
+def _time_bounds(key: tuple[int, int, int]) -> tuple[str, str]:
+    """A coarse year/month is a period, never an invented event day."""
+    year, month, day = key
+    start = datetime(year, month or 1, day or 1)
+    if day:
+        end = start + timedelta(days=1)
+    elif month:
+        end = start.replace(year=year + (month == 12), month=month % 12 + 1)
+    else:
+        end = start.replace(year=year + 1)
+    return start.date().isoformat(), end.date().isoformat()
+
+
 def _chunks(values: Iterable[str], size: int) -> Iterable[list[str]]:
     chunk: list[str] = []
     for value in sorted(set(values)):
@@ -288,7 +292,7 @@ def _chunks(values: Iterable[str], size: int) -> Iterable[list[str]]:
         yield chunk
 
 
-def extract_structure(content: str, timestamp_ms: int | None = None) -> dict[str, Any]:
+def extract_structure(content: str, timestamp_ms: int | None = None, role: str = "user") -> dict[str, Any]:
     """Extract conservative, auditable structure without generating benchmark answers."""
     entities: set[str] = set()
     relations: list[dict[str, str]] = []
@@ -360,13 +364,19 @@ def extract_structure(content: str, timestamp_ms: int | None = None) -> dict[str
             seen_relations.add(key)
             unique_relations.append(relation)
     event_time, event_time_key, temporal_expression = _event_time(content, timestamp_ms)
-    order_hint = -1 if re.search(r"\b(before|earlier|first|previously|formerly|过去|先前|之前|最初)\b", lowered) else 1 if re.search(r"\b(after|later|then|subsequently|now|currently|current|latest|最近|现在|当前|后来|之后)\b", lowered) else 0
+    order_hint = -1 if re.search(r"\b(before|earlier|first|previously|formerly|original|old)\b|过去|先前|之前|最初|原来", lowered) else 1 if re.search(r"\b(after|later|then|subsequently|now|currently|current|latest)\b|最近|现在|当前|后来|之后", lowered) else 0
     event = {
         "type": event_type, "event_time": event_time, "event_time_key": event_time_key,
+        "time_windows": event_time_windows(content, timestamp_ms),
         "temporal_expression": temporal_expression, "order_hint": order_hint,
     }
     events = _event_sequence(content, event_type, event, timestamp_ms)
-    return {"memory_type": event_type, "event": event, "events": events, "entities": sorted(entities), "relations": unique_relations}
+    facts = extract_facts(content, role)
+    for fact in facts:
+        if not fact["subject"].startswith("__"):
+            _add_entity(entities, fact["subject"])
+        _add_entity(entities, fact["value"])
+    return {"memory_type": event_type, "event": event, "events": events, "entities": sorted(entities), "relations": unique_relations, "facts": facts}
 
 
 def stable_id(user_id: str, session_id: str, content: str) -> str:
@@ -394,8 +404,8 @@ class Memory:
 
 
 class MemoryStore:
-    _GRAPH_CANDIDATE_LIMIT = 512
-    DEFAULT_FEATURES = frozenset({"entity", "graph", "temporal", "adjacency", "conflict", "options"})
+    _GRAPH_CANDIDATE_LIMIT = 128
+    DEFAULT_FEATURES = frozenset({"entity", "graph", "temporal", "adjacency", "conflict", "options", "facts", "coverage"})
 
     def __init__(self, db_path: str = "data/memories.sqlite3", features: Iterable[str] | None = None) -> None:
         self.db_path = db_path
@@ -472,6 +482,22 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS idx_rel_subject ON memory_relations(user_id, subject, memory_id);
             CREATE INDEX IF NOT EXISTS idx_rel_object ON memory_relations(user_id, object, memory_id);
             CREATE INDEX IF NOT EXISTS idx_rel_previous ON memory_relations(user_id, previous, memory_id);
+            CREATE TABLE IF NOT EXISTS memory_facts (
+                memory_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                value TEXT NOT NULL,
+                text TEXT NOT NULL,
+                polarity INTEGER NOT NULL,
+                exclusive INTEGER NOT NULL,
+                explicit_update INTEGER NOT NULL,
+                source_order INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                superseded_by TEXT,
+                PRIMARY KEY(memory_id,subject,predicate,value,polarity)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_key ON memory_facts(user_id,subject,predicate,status);
             CREATE TABLE IF NOT EXISTS add_requests (
                 user_id TEXT NOT NULL,
                 request_id TEXT NOT NULL,
@@ -498,6 +524,8 @@ class MemoryStore:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_session_sequence ON memories(user_id, session_id, sequence_no)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_source_time ON memories(user_id, timestamp_ms)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(user_id, status)")
+        if "source_order" not in {row["name"] for row in conn.execute("PRAGMA table_info(memory_facts)")}:
+            conn.execute("ALTER TABLE memory_facts ADD COLUMN source_order INTEGER NOT NULL DEFAULT 0")
         try:
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5("
@@ -507,14 +535,14 @@ class MemoryStore:
             # ponytail: fallback remains available for SQLite builds without FTS5; official image has FTS5.
             self._fts_enabled = False
         if self._fts_enabled:
-            version = "token-index-v3-structure"
+            version = "token-index-v4-fact-keys"
             row = conn.execute("SELECT value FROM memory_meta WHERE key='fts_version'").fetchone()
             if not row or row["value"] != version:
                 conn.execute("DELETE FROM memories_fts")
-                rows = conn.execute("SELECT memory_id,user_id,content,model_term_json FROM memories").fetchall()
+                rows = conn.execute("SELECT memory_id,user_id,content,model_term_json,role FROM memories").fetchall()
                 conn.executemany(
                     "INSERT INTO memories_fts(memory_id,user_id,search_text) VALUES(?,?,?)",
-                    [(item["memory_id"], item["user_id"], index_text(item["content"], json.loads(item["model_term_json"]))) for item in rows],
+                    [(item["memory_id"], item["user_id"], index_text(item["content"], [*json.loads(item["model_term_json"]), *fact_index_terms(extract_facts(item["content"], item["role"]))])) for item in rows],
                 )
                 conn.execute(
                     "INSERT INTO memory_meta(key,value) VALUES('fts_version',?) "
@@ -525,19 +553,26 @@ class MemoryStore:
         conn.commit()
 
     def _backfill_structure(self, conn: sqlite3.Connection) -> None:
-        version = "structure-v6-source-time-give"
+        version = "structure-v10-fact-source-calendar"
         version_row = conn.execute("SELECT value FROM memory_meta WHERE key='structure_version'").fetchone()
         if version_row and version_row["value"] == version:
             return
-        rows = conn.execute("SELECT memory_id,user_id,content,timestamp_ms FROM memories").fetchall()
+        conn.execute("DELETE FROM memory_facts")
+        rows = conn.execute("SELECT memory_id,user_id,content,timestamp_ms,role FROM memories ORDER BY created_at,memory_id").fetchall()
         for row in rows:
-            structure = extract_structure(row["content"], row["timestamp_ms"])
+            structure = extract_structure(row["content"], row["timestamp_ms"], row["role"])
+            if "conflict" in self.features:
+                self._inherit_explicit_change_key(conn, row["user_id"], row["content"], structure)
             event = structure["event"]
             conn.execute(
                 "UPDATE memories SET structure_json=?,event_type=?,event_time=?,event_time_key=? WHERE memory_id=?",
                 (json.dumps(structure, ensure_ascii=False), structure.get("memory_type", "fact"), event.get("event_time"), event.get("event_time_key"), row["memory_id"]),
             )
             self._replace_structure_indexes(conn, row["memory_id"], row["user_id"], structure)
+            if self._fts_enabled:
+                old_terms = conn.execute("SELECT model_term_json FROM memories WHERE memory_id=?", (row["memory_id"],)).fetchone()[0]
+                conn.execute("DELETE FROM memories_fts WHERE memory_id=?", (row["memory_id"],))
+                conn.execute("INSERT INTO memories_fts(memory_id,user_id,search_text) VALUES(?,?,?)", (row["memory_id"], row["user_id"], index_text(row["content"], [*json.loads(old_terms), *structure_index_terms(structure)])))
         conn.execute(
             "INSERT INTO memory_meta(key,value) VALUES('structure_version',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -558,6 +593,84 @@ class MemoryStore:
                 for item in structure.get("relations", []) if item.get("subject") and item.get("object")
             ],
         )
+        conn.execute("DELETE FROM memory_facts WHERE memory_id=?", (memory_id,))
+        for fact in structure.get("facts", []):
+            conn.execute(
+                "INSERT INTO memory_facts(memory_id,user_id,subject,predicate,value,text,polarity,exclusive,explicit_update,source_order) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(memory_id,subject,predicate,value,polarity) DO UPDATE SET text=excluded.text,source_order=excluded.source_order,exclusive=excluded.exclusive,explicit_update=excluded.explicit_update",
+                (memory_id, user_id, fact["subject"], fact["predicate"], fact["value"], fact["text"],
+                 int(fact["polarity"]), int(fact["exclusive"]), int(fact["explicit_update"]), int(fact.get("_state_order", fact.get("source_start", 0)))),
+            )
+            if "conflict" in self.features:
+                self._reconcile_fact_key(conn, user_id, fact["subject"], fact["predicate"])
+
+    @staticmethod
+    def _inherit_explicit_change_key(conn: sqlite3.Connection, user_id: str, content: str, structure: dict[str, Any]) -> None:
+        """Resolve a from-X-to-Y update only when a prior property is unique."""
+        if not supports_state_update(content):
+            return
+        for relation in structure.get("relations", []):
+            if relation.get("predicate") != "changed_to" or not relation.get("previous"):
+                continue
+            old = conn.execute(
+                "SELECT DISTINCT subject,predicate,exclusive FROM memory_facts WHERE user_id=? AND subject=? AND value=? AND polarity=1",
+                (user_id, relation["subject"], relation["previous"]),
+            ).fetchall()
+            if len(old) != 1:
+                continue
+            fact = {"subject": old[0]["subject"], "predicate": old[0]["predicate"], "value": relation["object"],
+                    "text": content, "polarity": True, "exclusive": bool(old[0]["exclusive"]), "explicit_update": True,
+                    "source_start": 0, "source_end": len(content), "_state_order": max(0, content.casefold().find(relation["object"]))}
+            if not old[0]["exclusive"]:
+                retired = {**fact, "value": relation["previous"], "polarity": False,
+                           "_state_order": max(0, content.casefold().find(relation["previous"]))}
+                if not any((f["subject"], f["predicate"], f["value"], f["polarity"]) == (retired["subject"], retired["predicate"], retired["value"], False) for f in structure["facts"]):
+                    structure["facts"].append(retired)
+            if not any((f["subject"], f["predicate"], f["value"]) == (fact["subject"], fact["predicate"], fact["value"]) for f in structure["facts"]):
+                structure["facts"].append(fact)
+
+    @staticmethod
+    def _reconcile_fact_key(conn: sqlite3.Connection, user_id: str, subject: str, predicate: str) -> None:
+        """Maintain atomic state history, including out-of-order source writes.
+
+        Scalar attributes compete by key. Multi-valued preferences only compete
+        when the same value is explicitly affirmed/negated; tea does not erase
+        coffee. Whole source messages remain available for historical retrieval.
+        """
+        rows = conn.execute(
+            "SELECT f.*,m.timestamp_ms,m.created_at,m.message_index,m.content,m.role FROM memory_facts f "
+            "JOIN memories m ON m.memory_id=f.memory_id "
+            "WHERE f.user_id=? AND f.subject=? AND f.predicate=?",
+            (user_id, subject, predicate),
+        ).fetchall()
+        timed = all(row["timestamp_ms"] is not None for row in rows)
+        timed_roles = {role: all(row["timestamp_ms"] is not None for row in rows if row["role"] == role) for role in {row["role"] for row in rows}}
+        ordered = sorted(rows, key=lambda row: (row["timestamp_ms"] if (timed_roles[row["role"]] if subject == "__user__" else timed) else row["created_at"], row["created_at"], row["message_index"], row["memory_id"], row["source_order"]))
+        scalar = any(row["exclusive"] for row in rows)
+        active: list[sqlite3.Row] = []
+        states: dict[tuple[str, str, int], tuple[str, str | None]] = {}
+        for new in ordered:
+            retained = []
+            for old in active:
+                # A generated statement about the user is a different source
+                # of evidence from the user's self-report. Keep both source
+                # histories instead of letting the assistant revoke it.
+                if subject == "__user__" and old["role"] != new["role"]:
+                    retained.append(old)
+                    continue
+                replaces = old["value"] == new["value"] or (scalar and new["polarity"] and old["polarity"])
+                if replaces:
+                    states[(old["memory_id"], old["value"], old["polarity"])] = ("superseded", new["memory_id"])
+                else:
+                    retained.append(old)
+            active = [*retained, new]
+            states[(new["memory_id"], new["value"], new["polarity"])] = ("active", None)
+        for row in rows:
+            status, replaced_by = states[(row["memory_id"], row["value"], row["polarity"])]
+            conn.execute(
+                "UPDATE memory_facts SET status=?,superseded_by=? WHERE memory_id=? AND subject=? AND predicate=? AND value=? AND polarity=?",
+                (status, replaced_by, row["memory_id"], subject, predicate, row["value"], row["polarity"]),
+            )
 
     @staticmethod
     def _row_to_memory(row: sqlite3.Row) -> Memory:
@@ -600,7 +713,7 @@ class MemoryStore:
             )
             self._replace_structure_indexes(conn, memory_id, user_id, structure)
             if self._fts_enabled:
-                conn.execute("INSERT INTO memories_fts(memory_id,user_id,search_text) VALUES(?,?,?)", (memory_id, user_id, index_text(content.strip(), model_list)))
+                conn.execute("INSERT INTO memories_fts(memory_id,user_id,search_text) VALUES(?,?,?)", (memory_id, user_id, index_text(content.strip(), [*model_list, *structure_index_terms(structure)])))
             conn.commit()
         return memory_id
 
@@ -656,7 +769,9 @@ class MemoryStore:
                         ids.append(memory_id)
                         continue
                     timestamp_ms = message.get("timestamp")
-                    structure = extract_structure(content, timestamp_ms)
+                    structure = extract_structure(content, timestamp_ms, message["role"])
+                    if "conflict" in self.features:
+                        self._inherit_explicit_change_key(conn, user_id, content, structure)
                     event = structure["event"]
                     conn.execute(
                         "INSERT INTO memories(memory_id,user_id,session_id,request_id,content,created_at,token_json,model_term_json,structure_json,event_type,event_time,event_time_key,sequence_no,role,timestamp_ms,message_index) "
@@ -670,7 +785,7 @@ class MemoryStore:
                     if self._fts_enabled:
                         conn.execute(
                             "INSERT INTO memories_fts(memory_id,user_id,search_text) VALUES(?,?,?)",
-                            (memory_id, user_id, index_text(content)),
+                            (memory_id, user_id, index_text(content, structure_index_terms(structure))),
                         )
                     if "conflict" in self.features:
                         self._mark_explicit_supersessions(conn, user_id, memory_id, structure)
@@ -701,11 +816,18 @@ class MemoryStore:
                 conn.execute("DELETE FROM memories_fts WHERE memory_id=?", (memory_id,))
             conn.execute("DELETE FROM memory_entities WHERE memory_id=?", (memory_id,))
             conn.execute("DELETE FROM memory_relations WHERE memory_id=?", (memory_id,))
+            keys = conn.execute("SELECT DISTINCT subject,predicate FROM memory_facts WHERE memory_id=?", (memory_id,)).fetchall()
+            conn.execute("DELETE FROM memory_facts WHERE memory_id=?", (memory_id,))
             conn.execute("DELETE FROM memories WHERE memory_id=? AND user_id=?", (memory_id, user_id))
+            for key in keys:
+                self._reconcile_fact_key(conn, user_id, key["subject"], key["predicate"])
 
     @staticmethod
     def _mark_explicit_supersessions(conn: sqlite3.Connection, user_id: str, new_id: str, structure: dict[str, Any]) -> None:
         """Only explicit from-X-to-Y changes supersede matching older facts."""
+        source = conn.execute("SELECT content FROM memories WHERE memory_id=?", (new_id,)).fetchone()
+        if source is None or not supports_state_update(source["content"]):
+            return
         for relation in structure.get("relations", []):
             if relation.get("predicate") != "changed_to" or not relation.get("previous"):
                 continue
@@ -719,6 +841,10 @@ class MemoryStore:
                 (new_id, user_id, relation["subject"], relation["previous"], new_id),
             ).fetchall()
             for row in rows:
+                # Retiring one property cannot invalidate the other facts in
+                # its original multi-attribute message.
+                if conn.execute("SELECT 1 FROM memory_facts WHERE memory_id=? AND status='active' LIMIT 1", (row["memory_id"],)).fetchone():
+                    continue
                 conn.execute(
                     "UPDATE memories SET status='superseded',superseded_by=? WHERE memory_id=? AND user_id=? AND status='active'",
                     (new_id, row["memory_id"], user_id),
@@ -728,13 +854,13 @@ class MemoryStore:
         model_list = [normalize(term) for term in model_terms if isinstance(term, str) and term.strip()]
         with self._lock:
             conn = self._connection()
-            row = conn.execute("SELECT user_id,content FROM memories WHERE memory_id=?", (memory_id,)).fetchone()
+            row = conn.execute("SELECT user_id,content,structure_json FROM memories WHERE memory_id=?", (memory_id,)).fetchone()
             if not row:
                 return
             conn.execute("UPDATE memories SET model_term_json=? WHERE memory_id=?", (json.dumps(model_list, ensure_ascii=False), memory_id))
             if self._fts_enabled:
                 conn.execute("DELETE FROM memories_fts WHERE memory_id=?", (memory_id,))
-                conn.execute("INSERT INTO memories_fts(memory_id,user_id,search_text) VALUES(?,?,?)", (memory_id, row["user_id"], index_text(row["content"], model_list)))
+                conn.execute("INSERT INTO memories_fts(memory_id,user_id,search_text) VALUES(?,?,?)", (memory_id, row["user_id"], index_text(row["content"], [*model_list, *structure_index_terms(json.loads(row["structure_json"]))])))
             conn.commit()
 
     def _load_user(self, user_id: str) -> list[Memory]:
@@ -765,6 +891,7 @@ class MemoryStore:
         values = set(doc.token_list)
         for phrase in doc.model_terms:
             values.update(terms(phrase))
+        values.update(terms(" ".join(structure_index_terms(doc.structure))))
         return values
 
     def _entity_candidates(self, user_id: str, entities: set[str], limit: int) -> set[str]:
@@ -777,6 +904,52 @@ class MemoryStore:
             [user_id, *sorted(entities), limit],
         ).fetchall()
         return {str(row["memory_id"]) for row in rows}
+
+    @staticmethod
+    def _fact_query_scope(query: str, query_entities: set[str]) -> tuple[set[str], set[str]]:
+        predicates: set[str] = set()
+        mappings = {
+            "phone": r"\b(phone|telephone|mobile|contact number)\b|电话|手机号",
+            "email": r"\b(e-?mail)\b|邮箱|邮件地址",
+            "name": r"\b(name|called)\b|名字|姓名",
+            "address": r"\b(address)\b|住址|地址",
+            "location": r"\b(live|lives|living|reside|residence|moved)\b|住在|居住|搬到",
+            "employer": r"\b(employer|company|work|works|working)\b|公司|雇主|工作",
+            "occupation": r"\b(job|occupation|profession|professional role)\b|职业|职位",
+            "preference": r"\b(prefer|prefers|preference|like|likes|drink|drinks)\b|喜欢|偏好|喝",
+            "uses": r"\b(database|use|uses|used)\b|数据库|使用",
+        }
+        for predicate, pattern in mappings.items():
+            if re.search(pattern, query, re.IGNORECASE):
+                predicates.add(predicate)
+        subjects = set(query_entities)
+        if re.search(r"\b(i|my|me|mine)\b|我的|我现在|我住|我喜欢|我偏好", query, re.IGNORECASE):
+            subjects.add("__user__")
+        if re.search(r"\b(assistant|your|you)\b|助手", query, re.IGNORECASE):
+            subjects.add("__assistant__")
+        return predicates, subjects
+
+    @staticmethod
+    def _fact_matches(fact: dict[str, Any], predicates: set[str], subjects: set[str]) -> bool:
+        return any(fact["predicate"] == key or fact["predicate"].startswith(key + ":") for key in predicates) and (not subjects or fact["subject"] in subjects)
+
+    def _fact_candidates(self, user_id: str, predicates: set[str], subjects: set[str], limit: int) -> set[str]:
+        if not predicates or "facts" not in self.features:
+            return set()
+        clauses = " OR ".join("(f.predicate=? OR f.predicate LIKE ?)" for _ in predicates)
+        parameters: list[Any] = [user_id]
+        for key in sorted(predicates):
+            parameters.extend((key, key + ":%"))
+        subject_clause = ""
+        if subjects:
+            subject_clause = " AND f.subject IN (" + ",".join("?" for _ in subjects) + ")"
+            parameters.extend(sorted(subjects))
+        parameters.append(limit)
+        rows = self._connection().execute(
+            "SELECT DISTINCT f.memory_id FROM memory_facts f JOIN memories m ON m.memory_id=f.memory_id "
+            f"WHERE f.user_id=? AND ({clauses}){subject_clause} ORDER BY m.created_at DESC LIMIT ?", parameters,
+        ).fetchall()
+        return {row["memory_id"] for row in rows}
 
     def _expand_graph(self, user_id: str, seeds: set[str], max_hops: int = 2) -> dict[str, int]:
         depths = {memory_id: 0 for memory_id in seeds}
@@ -798,6 +971,20 @@ class MemoryStore:
                 ).fetchall()
                 endpoints.update(value for row in relation_rows for value in (row["subject"], row["object"], row["previous"]) if value)
                 endpoints.update(row["entity"] for row in entity_rows if row["entity"])
+            if not endpoints:
+                break
+            scope_size = conn.execute("SELECT COUNT(*) FROM memories WHERE user_id=?", (user_id,)).fetchone()[0]
+            # Common entities are poor bridges (e.g. every note names Alice).
+            # Never fan out across the whole scope through such a hub.
+            informative: set[str] = set()
+            for endpoint_chunk in _chunks(endpoints, 250):
+                placeholders = ",".join("?" for _ in endpoint_chunk)
+                degrees = conn.execute(
+                    f"SELECT entity,COUNT(*) AS n FROM memory_entities WHERE user_id=? AND entity IN ({placeholders}) GROUP BY entity",
+                    [user_id, *endpoint_chunk],
+                ).fetchall()
+                informative.update(row["entity"] for row in degrees if row["n"] <= max(8, int(scope_size * 0.12)))
+            endpoints.intersection_update(informative)
             if not endpoints:
                 break
             next_frontier: set[str] = set()
@@ -825,12 +1012,21 @@ class MemoryStore:
         if not isinstance(user_id, str) or not user_id.strip() or not isinstance(query, str) or not query.strip():
             raise ValueError("user_id and query are required")
         top_k = max(1, min(int(top_k), 100))
+        conn = self._connection()
         query_structure = extract_structure(query)
         query_entities = set(query_structure.get("entities", [])) if "entity" in self.features else set()
+        fact_predicates, fact_subjects = self._fact_query_scope(query, query_entities)
+        requested_role = None
+        if re.search(r"\b(?:my own (?:statement|words)|i (?:said|stated|told)|what did i say)\b|我自己说|我说过|我的原话", query, re.IGNORECASE):
+            requested_role = "user"
+        elif re.search(r"\b(?:assistant (?:said|stated|told)|(?:what|which).*assistant.*(?:say|statement))\b|助手说|助手的原话", query, re.IGNORECASE):
+            requested_role = "assistant"
+        broad_query = "coverage" in self.features and bool(re.search(
+            r"\b(summarize|summarise|summary|overview|everything|all events|entire history|overall|across sessions)\b|总结|概述|所有经历|整个历史|全部事件", query, re.IGNORECASE,
+        ))
         seed_ids: set[str] = set()
         fts_rank: dict[str, int] = {}
         candidate_limit = min(2000, max(64, top_k * 8))
-        conn = self._connection()
         if self._fts_enabled:
             candidate_query = " ".join([query, *((options or []) if "options" in self.features else [])])
             match_query = self._fts_query(candidate_query)
@@ -848,9 +1044,36 @@ class MemoryStore:
             seed_ids.update(doc.memory_id for doc in documents if self._memory_tokens(doc).intersection(query_terms(query)))
         entity_ids = self._entity_candidates(user_id, query_entities, candidate_limit)
         seed_ids.update(entity_ids)
+        seed_ids.update(self._fact_candidates(user_id, fact_predicates, fact_subjects, candidate_limit))
         query_event_time = query_structure.get("event", {}).get("event_time")
         query_order_hint = query_structure.get("event", {}).get("order_hint", 0)
         relative_anchor = bool(re.search(r"\b(before|after|earlier|later)\b|之前|之后|先前|后来", query, re.IGNORECASE))
+        # Search has no query timestamp. Use the latest supplied source time in
+        # this user scope as an explicit proxy for relative calendar queries;
+        # never substitute deployment/server time. This remains an assumption.
+        source_anchor = conn.execute("SELECT MAX(timestamp_ms) FROM memories WHERE user_id=?", (user_id,)).fetchone()[0]
+        time_window = query_time_window(query, source_anchor) if "temporal" in self.features else None
+        if time_window:
+            window_start, window_end = time_window
+            start_ms = int(datetime.fromisoformat(window_start).replace(tzinfo=timezone.utc).timestamp() * 1000)
+            end_ms = int(datetime.fromisoformat(window_end).replace(tzinfo=timezone.utc).timestamp() * 1000)
+            rows = conn.execute(
+                "SELECT memory_id FROM memories WHERE user_id=? AND "
+                "((event_time>=? AND event_time<?) OR (timestamp_ms>=? AND timestamp_ms<?) OR "
+                "EXISTS(SELECT 1 FROM json_each(memories.structure_json,'$.event.time_windows') w "
+                "WHERE json_extract(w.value,'$[0]')<? AND json_extract(w.value,'$[1]')>?)) "
+                "ORDER BY created_at DESC LIMIT ?", (user_id, window_start, window_end, start_ms, end_ms, window_end, window_start, candidate_limit),
+            ).fetchall()
+            seed_ids.update(row["memory_id"] for row in rows)
+        if broad_query:
+            # Round-robin coverage is only for global summaries. Ordinary fact
+            # queries retain pure relevance order and no per-session quota.
+            rows = conn.execute(
+                "SELECT memory_id FROM (SELECT memory_id,ROW_NUMBER() OVER "
+                "(PARTITION BY session_id ORDER BY sequence_no) AS episode_rank FROM memories WHERE user_id=?) "
+                "ORDER BY episode_rank,memory_id LIMIT ?", (user_id, candidate_limit),
+            ).fetchall()
+            seed_ids.update(row["memory_id"] for row in rows)
         if "temporal" in self.features and query_order_hint > 0 and not query_event_time and not relative_anchor:
             recent_rows = conn.execute(
                 "SELECT memory_id FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
@@ -886,7 +1109,11 @@ class MemoryStore:
                     (user_id, query_event_time + "%", int(source_time.timestamp() * 1000), int(end_time.timestamp() * 1000), candidate_limit),
                 ).fetchall()
             seed_ids.update(str(row["memory_id"]) for row in rows)
-        graph_depths = self._expand_graph(user_id, seed_ids, max_hops=2) if "graph" in self.features else {memory_id: 0 for memory_id in seed_ids}
+        ordered_seeds = sorted(seed_ids, key=lambda memory_id: (fts_rank.get(memory_id, candidate_limit), memory_id))
+        graph_seeds = set(ordered_seeds[:12])
+        graph_depths = {memory_id: 0 for memory_id in seed_ids}
+        if "graph" in self.features:
+            graph_depths.update({key: depth for key, depth in self._expand_graph(user_id, graph_seeds, max_hops=2).items() if key not in seed_ids})
         temporal_anchor_id: str | None = None
         temporal_anchor_value: float | None = None
         temporal_anchor_source = False
@@ -910,7 +1137,7 @@ class MemoryStore:
             for row in near_rows:
                 graph_depths.setdefault(str(row["memory_id"]), 1)
         if seed_ids and "adjacency" in self.features:
-            for seed_chunk in _chunks(seed_ids, 400):
+            for seed_chunk in _chunks(ordered_seeds[:12], 400):
                 placeholders = ",".join("?" for _ in seed_chunk)
                 neighbor_rows = conn.execute(
                     "SELECT DISTINCT n.memory_id FROM memories s JOIN memories n "
@@ -921,7 +1148,7 @@ class MemoryStore:
                 ).fetchall()
                 for row in neighbor_rows:
                     graph_depths.setdefault(str(row["memory_id"]), 1)
-        if not graph_depths and re.match(r"\s*(?:what|which|who|where|when|why|how)\b", query, re.IGNORECASE):
+        if not graph_depths and re.match(r"\s*(?:(?:what|which|who|where|when|why|how)\b|什么|哪个|谁|哪里|何时|为什么|如何)", query, re.IGNORECASE):
             # A bounded, source-only recall path for paraphrases outside the
             # small deterministic alias list. Unknown keyword probes still return [].
             recent_rows = conn.execute(
@@ -941,22 +1168,41 @@ class MemoryStore:
         query_temporal_key = _time_sort_key(query_event_time)
         temporal_question = "temporal" in self.features and bool(q_set.intersection({"when", "date", "time", "year", "before", "after", "earlier", "later", "latest", "current", "currently", "now", "先前", "之前", "之后", "最近", "现在", "当前"}))
         document_time_keys = {}
+        document_time_windows = {}
         for doc in documents:
             keys = _structure_time_keys(doc.structure)
-            if not keys and doc.timestamp_ms is not None:
+            windows = doc.structure.get("event", {}).get("time_windows", [])
+            if not windows and not doc.structure.get("event", {}).get("temporal_expression") and doc.timestamp_ms is not None:
                 source_date = datetime.fromtimestamp(doc.timestamp_ms / 1000, tz=timezone.utc)
                 keys = [(source_date.year, source_date.month, source_date.day)]
+                windows = [_time_bounds(keys[0])]
             document_time_keys[doc.memory_id] = keys
+            document_time_windows[doc.memory_id] = windows
         dated_keys = [key for keys in document_time_keys.values() for key in keys]
         earliest_key = min(dated_keys, default=None)
         latest_key = max(dated_keys, default=None)
-        temporal_words = {"before", "after", "earlier", "later", "latest", "current", "currently", "now", "most", "recent", "previous", "先前", "之前", "之后", "最近", "现在", "当前"}
+        temporal_words = {"before", "after", "earlier", "later", "latest", "current", "currently", "now", "most", "recent", "previous", "present", "subsequent", "date", "time", "year", "person", "author", "team", "location", "place", "reason", "because", "method", "process", "way", "先前", "之前", "之后", "最近", "现在", "当前"}
         topic_terms = q_set - temporal_words
-        topic_docs = [doc for doc in documents if doc_token_sets[doc.memory_id].intersection(topic_terms)]
+        topic_docs = [doc for doc in documents if doc_token_sets[doc.memory_id].intersection(topic_terms)
+                      and (not query_entities or query_entities.intersection(doc.structure.get("entities", [])))
+                      and (not fact_predicates or any(self._fact_matches(f, fact_predicates, fact_subjects) for f in doc.structure.get("facts", [])) or not fact_subjects)]
         all_source_timed = bool(topic_docs) and all(doc.timestamp_ms is not None for doc in topic_docs)
         latest_topic_id = max(topic_docs, key=lambda doc: (doc.timestamp_ms if all_source_timed else doc.created_at, doc.memory_id)).memory_id if topic_docs else None
         earliest_topic_id = min(topic_docs, key=lambda doc: (doc.timestamp_ms if all_source_timed else doc.created_at, doc.memory_id)).memory_id if topic_docs else None
         scored: list[tuple[float, Memory]] = []
+        fact_states: dict[str, list[dict[str, Any]]] = {}
+        for id_chunk in _chunks(graph_depths, 350):
+            placeholders = ",".join("?" for _ in id_chunk)
+            for row in conn.execute(f"SELECT * FROM memory_facts WHERE user_id=? AND memory_id IN ({placeholders})", [user_id, *id_chunk]):
+                fact_states.setdefault(row["memory_id"], []).append(dict(row))
+        explicit_value_check = any(normalize(f["value"]) in normalize(query) for rows in fact_states.values() for f in rows if self._fact_matches(f, fact_predicates, fact_subjects))
+        if fact_predicates and not explicit_value_check and query_order_hint >= 0 and not time_window:
+            positives = [doc for doc in topic_docs if any(f["status"] == "active" and f["polarity"] for f in fact_states.get(doc.memory_id, []) if self._fact_matches(f, fact_predicates, fact_subjects))]
+            self_reports = [doc for doc in positives if doc.role == "user" and any(f["subject"] == "__user__" and f["status"] == "active" and f["polarity"] for f in fact_states.get(doc.memory_id, []) if self._fact_matches(f, fact_predicates, fact_subjects))]
+            if self_reports and requested_role != "assistant":
+                positives = self_reports
+            if positives:
+                latest_topic_id = max(positives, key=lambda doc: (doc.timestamp_ms if all_source_timed else doc.created_at, doc.memory_id)).memory_id
         now = time.time()
         avg_len = max(1.0, sum(len(doc.token_list) for doc in documents) / len(documents))
         for doc in documents:
@@ -964,6 +1210,8 @@ class MemoryStore:
             expanded_doc_terms = list(doc.token_list)
             for phrase_item in doc.model_terms:
                 expanded_doc_terms.extend(terms(phrase_item))
+            if "facts" in self.features:
+                expanded_doc_terms.extend(terms(" ".join(structure_index_terms(doc.structure))))
             counts: dict[str, int] = {}
             for token in expanded_doc_terms:
                 counts[token] = counts.get(token, 0) + 1
@@ -984,11 +1232,23 @@ class MemoryStore:
             relation_overlap = len(query_entities.intersection(relation_values)) / max(1, len(query_entities)) if "entity" in self.features else 0.0
             graph_bonus = 1.5 / (graph_depths.get(doc.memory_id, 2) + 1) if "graph" in self.features and doc.memory_id not in fts_rank else 0.0
             doc_temporal_keys = document_time_keys.get(doc.memory_id, [])
+            doc_periods = document_time_windows.get(doc.memory_id, [])
             temporal_bonus = 0.0
-            if "temporal" in self.features and query_temporal_key and doc_temporal_keys:
-                if query_order_hint < 0 and min(doc_temporal_keys) < query_temporal_key:
+            if "temporal" in self.features and query_temporal_key and relative_anchor and doc_periods:
+                query_start, query_end = _time_bounds(query_temporal_key)
+                if query_order_hint < 0 and all(start >= query_start for start, _ in doc_periods):
+                    continue
+                if query_order_hint > 0 and all(end <= query_end for _, end in doc_periods):
+                    continue
+            if time_window:
+                # An explicitly dated event takes precedence over when it was
+                # reported. The source date is only a fallback for undated text.
+                in_window = any(start < window_end and end > window_start for start, end in doc_periods)
+                temporal_bonus += 6.0 if in_window else -2.0 if doc_periods else 0.0
+            if "temporal" in self.features and query_temporal_key and doc_temporal_keys and not time_window:
+                if query_order_hint < 0 and any(_time_bounds(key)[1] <= _time_bounds(query_temporal_key)[0] for key in doc_temporal_keys):
                     temporal_bonus += 2.0
-                elif query_order_hint > 0 and max(doc_temporal_keys) > query_temporal_key:
+                elif query_order_hint > 0 and any(_time_bounds(key)[0] >= _time_bounds(query_temporal_key)[1] for key in doc_temporal_keys):
                     temporal_bonus += 2.0
                 elif query_temporal_key in doc_temporal_keys:
                     temporal_bonus += 1.5
@@ -996,7 +1256,7 @@ class MemoryStore:
                     key[:len(date_parts)] == query_temporal_key[:len(date_parts)] for key in doc_temporal_keys
                 ):
                     temporal_bonus += 1.25
-            elif temporal_question and doc_temporal_keys:
+            elif temporal_question and doc_temporal_keys and not time_window:
                 temporal_bonus += 0.85
                 if query_temporal_key is None and query_order_hint > 0 and max(doc_temporal_keys) == latest_key:
                     temporal_bonus += 1.0
@@ -1022,12 +1282,23 @@ class MemoryStore:
                 temporal_bonus -= 1.25
             elif "conflict" in self.features and query_order_hint < 0 and doc.status == "superseded":
                 temporal_bonus += 0.75
+            fact_bonus = 0.0
+            matching_facts = [f for f in fact_states.get(doc.memory_id, []) if self._fact_matches(f, fact_predicates, fact_subjects)] if "facts" in self.features else []
+            if matching_facts:
+                fact_bonus += 3.0
+                if "conflict" in self.features and query_order_hint >= 0 and not time_window and not query_event_time and not relative_anchor:
+                    active = [f for f in matching_facts if f["status"] == "active"] if doc.status == "active" else []
+                    fact_bonus += (5.0 if explicit_value_check or any(f["polarity"] for f in active) else 1.0) if active else -4.0
+                # Reduce the penalty of an important exact property buried in a
+                # long message. Evidence remains the full original message.
+                fact_bonus += max((len(q_set.intersection(terms(f["text"]))) / max(1, len(q_set)) for f in matching_facts), default=0.0)
             rank_bonus = 1.5 / (fts_rank[doc.memory_id] + 1) if doc.memory_id in fts_rank else 0.0
-            score = bm25 + phrase_bonus + overlap + 2.0 * entity_overlap + 1.25 * relation_overlap + graph_bonus + temporal_bonus + session_bonus + recency_bonus + rank_bonus
+            source_bonus = (6.0 if doc.role == requested_role else -4.0) if requested_role else 0.0
+            score = bm25 + phrase_bonus + overlap + 4.0 * entity_overlap + 1.25 * relation_overlap + graph_bonus + temporal_bonus + fact_bonus + session_bonus + recency_bonus + rank_bonus + source_bonus
             if score > 0:
                 scored.append((score, doc))
         scored.sort(key=lambda pair: (-pair[0], -pair[1].created_at, pair[1].memory_id))
-        selected = [doc for _, doc in scored[:top_k]]
+        selected = self._select_evidence(scored, top_k, query, query_entities, broad_query) if "coverage" in self.features else [doc for _, doc in scored[:top_k]]
         output: list[dict[str, str]] = []
         for doc in selected:
             content = doc.content
@@ -1037,9 +1308,71 @@ class MemoryStore:
                     instant = datetime.fromtimestamp(doc.timestamp_ms / 1000, tz=timezone.utc).isoformat()
                     source += f"; source_time={instant}"
                 source += f"; ingested_at={datetime.fromtimestamp(doc.created_at, tz=timezone.utc).isoformat()}"
+                states = fact_states.get(doc.memory_id, [])
+                if states:
+                    source += "; fact_states=" + ",".join(sorted({f"{f['subject']}/{f['predicate']}:{f['status']}" for f in states}))
+                if doc.status != "active":
+                    source += f"; record_status={doc.status}; superseded_by={doc.superseded_by}"
                 content = f"[{source}] {content}"
             output.append({"id": doc.memory_id, "content": content})
         return output
+
+    @staticmethod
+    def _select_evidence(scored: list[tuple[float, Memory]], top_k: int, query: str,
+                         query_entities: set[str], broad: bool) -> list[Memory]:
+        """Preserve relevance; pack bounded connected evidence for chain queries.
+
+        Global summaries use episode coverage, not an invented LLM summary.
+        Ordinary keyword/fact retrieval keeps its original relevance ordering.
+        """
+        if not scored:
+            return []
+        if broad:
+            groups: dict[str, list[Memory]] = {}
+            for _, doc in scored:
+                if query_entities and not query_entities.intersection(doc.structure.get("entities", [])):
+                    continue
+                groups.setdefault(doc.session_id, []).append(doc)
+            if not groups:
+                return [doc for _, doc in scored[:top_k]]
+            selected: list[Memory] = []
+            depth = 0
+            while len(selected) < top_k:
+                layer = [docs[depth] for docs in groups.values() if depth < len(docs)]
+                if not layer:
+                    break
+                selected.extend(layer[:top_k - len(selected)])
+                depth += 1
+            return selected
+        chain_query = bool(re.search(r"\b(who|whose|why|how|cause|caused|reason|relationship|connected|chain|path|led to|depends)\b|\bproject\b.*\b(manages|managed|leads|owns)\b|为什么|因果|谁的|关系|原因|导致|路径", query, re.IGNORECASE))
+        if not chain_query or not query_entities or top_k < 2:
+            return [doc for _, doc in scored[:top_k]]
+        docs = [doc for _, doc in scored]
+        by_entity: dict[str, list[Memory]] = {}
+        for doc in docs:
+            for entity in doc.structure.get("entities", []):
+                by_entity.setdefault(entity, []).append(doc)
+        selected = [docs[0]]
+        used = {docs[0].memory_id}
+        frontier = [docs[0]]
+        # Two hops, at most two original messages per hop. Never duplicate a
+        # source ID or use the query/gold as a new stored fact.
+        for _ in range(2):
+            neighbors: list[Memory] = []
+            for anchor in frontier:
+                for entity in anchor.structure.get("entities", []):
+                    if entity in query_entities or len(by_entity.get(entity, [])) > max(8, len(docs) * 0.12):
+                        continue
+                    neighbors.extend(doc for doc in by_entity.get(entity, []) if doc.memory_id not in used)
+            neighbor_ids = {doc.memory_id for doc in neighbors}
+            frontier = [doc for doc in docs if doc.memory_id in neighbor_ids][:2]
+            for doc in frontier:
+                if len(selected) == top_k:
+                    return selected
+                selected.append(doc)
+                used.add(doc.memory_id)
+        selected.extend(doc for doc in docs if doc.memory_id not in used)
+        return selected[:top_k]
 
 
 def utc_now() -> str:

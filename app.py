@@ -22,7 +22,7 @@ def _json_bytes(value: Any) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ChronicleMemory/2.0"
+    server_version = "ChronicleMemory/2.1"
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"{self.address_string()} - {format % args}")
@@ -34,7 +34,7 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         if auth.lower().startswith("bearer ") or auth.lower().startswith("token "):
             candidates.append(auth.split(" ", 1)[1])
-        return any(hmac.compare_digest(candidate, API_KEY) for candidate in candidates)
+        return any(hmac.compare_digest(candidate.encode("utf-8"), API_KEY.encode("utf-8")) for candidate in candidates)
 
     def _send(self, status: int, value: Any) -> None:
         data = _json_bytes(value)
@@ -47,7 +47,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path.split("?", 1)[0] == "/health":
-            self._send(HTTPStatus.OK, {"status": "ok", "service": "chronicle-memory-v2"})
+            self._send(HTTPStatus.OK, {"status": "ok", "service": "chronicle-memory-v2", "version": "2.1"})
             return
         self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 

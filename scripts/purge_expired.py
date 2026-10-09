@@ -42,6 +42,8 @@ def purge(db_path: Path, days: int, apply: bool) -> dict[str, int]:
                     conn.execute("DELETE FROM memories_fts WHERE user_id=?", (user_id,))
                 conn.execute("DELETE FROM memory_entities WHERE user_id=?", (user_id,))
                 conn.execute("DELETE FROM memory_relations WHERE user_id=?", (user_id,))
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_facts'").fetchone():
+                    conn.execute("DELETE FROM memory_facts WHERE user_id=?", (user_id,))
                 conn.execute("DELETE FROM add_requests WHERE user_id=?", (user_id,))
                 conn.execute("DELETE FROM memories WHERE user_id=?", (user_id,))
             conn.commit()

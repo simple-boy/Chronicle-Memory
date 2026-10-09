@@ -25,13 +25,39 @@
     "model_terms": {"type": "array", "items": {"type": "string"}},
     "structure": {
       "type": "object",
-      "required": ["memory_type", "event", "events", "entities", "relations"],
+      "required": ["memory_type", "event", "events", "entities", "relations", "facts"],
       "properties": {
         "memory_type": {"type": "string"},
-        "event": {"type": "object"},
+        "event": {
+          "type": "object",
+          "properties": {
+            "time_windows": {
+              "type": "array",
+              "description": "Source calendar periods as [start ISO date, exclusive end ISO date]; explicit stays include interior days.",
+              "items": {"type": "array", "prefixItems": [{"type": "string", "format": "date"}, {"type": "string", "format": "date"}], "minItems": 2, "maxItems": 2}
+            }
+          }
+        },
         "events": {"type": "array", "items": {"type": "object"}},
         "entities": {"type": "array", "items": {"type": "string"}},
-        "relations": {"type": "array", "items": {"type": "object"}}
+        "relations": {"type": "array", "items": {"type": "object"}},
+        "facts": {
+          "type": "array",
+          "description": "Derived index keys backed by exact source spans. Mutable state is in the separate memory_facts table, not this original extraction snapshot.",
+          "items": {
+            "type": "object",
+            "required": ["subject", "predicate", "value", "text", "polarity", "exclusive", "explicit_update"],
+            "properties": {
+              "subject": {"type": "string"},
+              "predicate": {"type": "string"},
+              "value": {"type": "string"},
+              "text": {"type": "string", "description": "Exact span from the raw source message."},
+              "polarity": {"type": "boolean"},
+              "exclusive": {"type": "boolean"},
+              "explicit_update": {"type": "boolean"}
+            }
+          }
+        }
       }
     }
   }
