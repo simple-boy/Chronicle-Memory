@@ -8,6 +8,9 @@ Chronicle-Memory V2 implements the participant side of the current contract: syn
 
 Local verification in WSL Python 3.11.0: 106 API/scenario/parser/protocol tests and 13 retained V1 tests passed; pinned-V2 database migration passed. On 120 fixed public synthetic development cases, Recall@5 improved from 88.89% to 100%; all 88 defined first-source checks passed. 
 
+##Coding track
+See [ForageTrace](https://github.com/simple-boy/ForageTrace.git)
+
 ## Compared with submitted V2
 
 | Code limitation | V2 change | Files |
